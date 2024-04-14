@@ -19,7 +19,11 @@ import static java.util.Objects.requireNonNull;
 
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.ListMultimap;
+import com.google.common.collect.Multimap;
 import com.google.protobuf.ByteString;
 import io.confluent.kafkarest.Errors;
 import io.confluent.kafkarest.controllers.ProduceController;
@@ -43,6 +47,7 @@ import io.confluent.kafkarest.response.JsonStream;
 import io.confluent.kafkarest.response.StreamingResponseFactory;
 import io.confluent.rest.annotations.PerformanceMetric;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -60,7 +65,9 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.container.Suspended;
 import javax.ws.rs.core.Context;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.MultivaluedMap;
 import org.apache.kafka.common.errors.SerializationException;
 import org.eclipse.jetty.http.HttpStatus;
 
@@ -140,7 +147,8 @@ public final class ProduceAction {
       @Suspended AsyncResponse asyncResponse,
       @PathParam("clusterId") String clusterId,
       @PathParam("topicName") String topicName,
-      JsonStream<ProduceRequest> requests)
+      JsonStream<ProduceRequest> requests,
+      @Context HttpHeaders headers)
       throws Exception {
 
     if (requests == null) {
@@ -152,7 +160,13 @@ public final class ProduceAction {
         .from(requests)
         .compose(
             request ->
-                produce(clusterId, topicName, request, controller, producerMetricsProvider.get()))
+                produce(
+                    clusterId,
+                    topicName,
+                    request,
+                    controller,
+                    producerMetricsProvider.get(),
+                    headers))
         .resume(asyncResponse);
   }
 
@@ -161,7 +175,8 @@ public final class ProduceAction {
       String topicName,
       ProduceRequest request,
       ProduceController controller,
-      ProducerMetrics metrics) {
+      ProducerMetrics metrics,
+      HttpHeaders headers) {
     final long requestStartNs = System.nanoTime();
 
     try {
@@ -208,7 +223,7 @@ public final class ProduceAction {
             clusterId,
             topicName,
             request.getPartitionId(),
-            request.getHeaders().stream().collect(PRODUCE_REQUEST_HEADER_COLLECTOR),
+            mergeHeaders(request, headers),
             serializedKey,
             serializedValue,
             request.getTimestamp().orElse(Instant.now()));
@@ -234,6 +249,45 @@ public final class ProduceAction {
               return response;
             },
             executorService);
+  }
+
+  private static ImmutableMultimap<String, Optional<ByteString>> mergeHeaders(
+      ProduceRequest request, HttpHeaders headers) {
+    Multimap<String, Optional<ByteString>> mutableMultimap =
+        HashMultimap.create(
+            request.getHeaders().stream().collect(PRODUCE_REQUEST_HEADER_COLLECTOR));
+
+    mutableMultimap.putAll(toByteStringMultimap(headers.getRequestHeaders()));
+
+    ImmutableMultimap<String, Optional<ByteString>> mergedMultimap =
+        ImmutableMultimap.copyOf(mutableMultimap);
+    return mergedMultimap;
+  }
+
+  static Multimap<String, Optional<ByteString>> toByteStringMultimap(
+      MultivaluedMap<String, String> multivaluedMap) {
+    ListMultimap<String, Optional<ByteString>> result = ArrayListMultimap.create();
+    if (multivaluedMap == null) {
+      return result;
+    }
+    for (String key : multivaluedMap.keySet()) {
+      List<String> values = multivaluedMap.get(key);
+      for (String value : values) {
+        Optional<ByteString> byteString = convertToByteString(value);
+        result.put(key, byteString);
+      }
+    }
+    return result;
+  }
+
+  static Optional<ByteString> convertToByteString(String value) {
+    try {
+      ByteString byteString = ByteString.copyFromUtf8(value);
+      return Optional.of(byteString);
+    } catch (IllegalArgumentException e) {
+      // Handle conversion failure, return an empty optional
+      return Optional.empty();
+    }
   }
 
   private Optional<RegisteredSchema> getSchema(

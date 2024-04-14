@@ -20,7 +20,7 @@
     </description>
 
     <properties>
-        <io.confluent.schema-registry.version>7.6.0-178</io.confluent.schema-registry.version>
+        <io.confluent.schema-registry.version>7.6.0</io.confluent.schema-registry.version>
     </properties>
 
     <dependencies>
